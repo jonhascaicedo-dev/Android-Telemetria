@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emisor Telemetría 12-Bytes</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #121212; color: #fff; }
+        button { padding: 12px 20px; margin: 8px 0; font-size: 16px; width: 100%; cursor: pointer; }
+        .log { background: #000; padding: 10px; font-family: monospace; height: 180px; overflow-y: scroll; border: 1px solid #333; }
+    </style>
+</head>
+<body>
+    <h2>📡 Emisor de Telemetría (12 Bytes)</h2>
+    
+    <label>IP / Dominio de tu servidor (ISP):</label>
+    <input type="text" id="serverIp" value="http://192.168.43.237:8080" style="width: 100%; padding: 8px; margin-bottom: 10px;">
+
+    <button onclick="iniciarGPS()" style="background-color: #2e7d32; color: white;">▶ Iniciar GPS Real</button>
+    <button onclick="iniciarEstrés()" style="background-color: #c62828; color: white;">⚡ Modo Prueba de Estrés (10 req/s)</button>
+    <button onclick="detener()" style="background-color: #555; color: white;">⏹ Detener</button>
+
+    <h3>Consola:</h3>
+    <div id="log" class="log"></div>
+
+    <script>
+        let intervalId = null;
+        let watchId = null;
+
+        function log(msg) {
+            const div = document.getElementById('log');
+            div.innerHTML += msg + "<br>";
+            div.scrollTop = div.scrollHeight;
+        }
+
+        // Empaquetado estricto a ArrayBuffer de 12 bytes
+        function crearPaquete12Bytes(lat, lon, speed, temp, weatherId, eventId) {
+            const buffer = new ArrayBuffer(12);
+            const view = new DataView(buffer);
+
+            view.setFloat32(0, lat, false);       // 4 Bytes: Float32 (Big-Endian)
+            view.setFloat32(4, lon, false);       // 4 Bytes: Float32 (Big-Endian)
+            view.setUint8(8, speed);              // 1 Byte: Uint8
+            view.setInt8(9, temp);                // 1 Byte: Int8
+            view.setUint8(10, weatherId);         // 1 Byte: Uint8
+            view.setUint8(11, eventId);           // 1 Byte: Uint8
+
+            return buffer;
+        }
+
+        async function enviarTrama(buffer) {
+            const endpoint = document.getElementById('serverIp').value;
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: buffer
+                });
+                if (response.ok) {
+                    log(`✅ Enviados 12 bytes hex: ${[...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('')}`);
+                }
+            } catch (err) {
+                log(`❌ Error de conexión: ${err.message}`);
+            }
+        }
+
+        function iniciarGPS() {
+            detener();
+            if ("geolocation" in navigator) {
+                log("📡 Iniciando rastreo GPS...");
+                watchId = navigator.geolocation.watchPosition(pos => {
+                    const buffer = crearPaquete12Bytes(
+                        pos.coords.latitude,
+                        pos.coords.longitude,
+                        Math.round((pos.coords.speed || 0) * 3.6), // m/s a km/h
+                        22, // Temperatura simulada
+                        1,  // WeatherID
+                        0   // Evento
+                    );
+                    enviarTrama(buffer);
+                }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
+            } else {
+                log("Geolocalización no soportada en este navegador.");
+            }
+        }
+
+        function iniciarEstrés() {
+            detener();
+            log("🚀 Iniciando prueba de estrés masiva...");
+            intervalId = setInterval(() => {
+                const buffer = crearPaquete12Bytes(4.6097, -74.0817, 85, 18, 1, 2);
+                enviarTrama(buffer);
+            }, 100); // Envia 10 paquetes por segundo por cliente
+        }
+
+        function detener() {
+            if (intervalId) clearInterval(intervalId);
+            if (watchId) navigator.geolocation.clearWatch(watchId);
+            log("⏹ Transmisión detenida.");
+        }
+    </script>
+</body>
+</html>
