@@ -3,27 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emisor de Telemetría (16 Bytes)</title>
+    <title>Emisor y Benchmark de Telemetría (16 Bytes)</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; padding: 15px; background: #121212; color: #fff; margin: 0; }
         .card { background: #1e1e1e; padding: 14px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333; }
         label { display: block; font-size: 13px; margin-bottom: 6px; color: #aaa; }
         input { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #fff; }
-        button { width: 100%; padding: 12px; margin: 5px 0; font-size: 15px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; }
+        .grid-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        button { width: 100%; padding: 12px; margin: 5px 0; font-size: 14px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; }
         .btn-gps { background-color: #2e7d32; color: #fff; }
-        .btn-emu { background-color: #0288d1; color: #fff; }
+        .btn-stress { background-color: #e65100; color: #fff; }
         .btn-stop { background-color: #c62828; color: #fff; }
-        .log { background: #000; padding: 10px; font-family: monospace; height: 280px; overflow-y: auto; border: 1px solid #333; font-size: 12px; border-radius: 6px; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center; margin-top: 10px; }
+        .metric-box { background: #2a2a2a; padding: 10px; border-radius: 6px; border: 1px solid #444; }
+        .metric-val { font-size: 18px; font-weight: bold; color: #ff9800; }
+        .metric-lbl { font-size: 11px; color: #aaa; }
+        .log { background: #000; padding: 10px; font-family: monospace; height: 220px; overflow-y: auto; border: 1px solid #333; font-size: 12px; border-radius: 6px; }
         .dev-badge { background: #333; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; color: #4caf50; }
         hr { border: 0; border-top: 1px solid #222; margin: 6px 0; }
     </style>
 </head>
 <body>
-    <h2>📡 Emisor de Telemetría Avanzada</h2>
+    <h2>🚀 Emisor y Benchmark de Telemetría</h2>
 
     <div class="card">
-        <label>Identificador de Dispositivo:</label>
-        <span id="devIdDisplay" class="dev-badge">Cargando ID...</span>
+        <label>ID Dispositivo Principal:</label>
+        <span id="devIdDisplay" class="dev-badge">Cargando...</span>
     </div>
 
     <div class="card">
@@ -32,9 +37,35 @@
     </div>
 
     <div class="card">
-        <button class="btn-gps" onclick="iniciarGPSReal()">📍 GPS Real + Sensores del Móvil</button>
-        <button class="btn-emu" onclick="iniciarEmulador()">🏎️ Emular Ruta de Vehículo</button>
-        <button class="btn-stop" onclick="detenerTransmision()">⏹ Detener Transmisión</button>
+        <label>Parámetros de Prueba de Estrés (Hogar):</label>
+        <div class="grid-inputs">
+            <div>
+                <label for="targetMbps">Límite Mbps (Subida):</label>
+                <input type="number" id="targetMbps" value="50" min="1" max="1000">
+            </div>
+            <div>
+                <label for="stepVehicles">Rampa (+Vehículos/seg):</label>
+                <input type="number" id="stepVehicles" value="25" min="1" max="500">
+            </div>
+        </div>
+        <button class="btn-stress" onclick="iniciarPruebaEstrés()">⚡ Iniciar Prueba de Carga Progresiva</button>
+        <button class="btn-gps" onclick="iniciarGPSReal()">📍 Modo Normal (GPS Celular)</button>
+        <button class="btn-stop" onclick="detenerTodo()">⏹ Detener Prueba</button>
+
+        <div class="metrics-grid">
+            <div class="metric-box">
+                <div id="mVehicles" class="metric-val">0</div>
+                <div class="metric-lbl">Vehículos Simultáneos</div>
+            </div>
+            <div class="metric-box">
+                <div id="mRps" class="metric-val">0</div>
+                <div class="metric-lbl">Req / Segundo</div>
+            </div>
+            <div class="metric-box">
+                <div id="mMbps" class="metric-val">0.00</div>
+                <div class="metric-lbl">Ancho Banda (Mbps)</div>
+            </div>
+        </div>
     </div>
 
     <h3>Consola de Registro:</h3>
@@ -42,9 +73,14 @@
 
     <script>
         let watchId = null;
-        let intervalId = null;
+        let stressInterval = null;
+        let metricsInterval = null;
+        
+        // Métricas globales
+        let totalEnviadosSombra = 0;
+        let listaVehiculosSimulados = [];
+        const EST_BYTES_POR_REQ = 520; // 16 bytes payload + ~504 bytes cabeceras HTTP/TCP/TLS
 
-        // 1. Obtener o generar un ID único persistente por teléfono/navegador
         function obtenerDeviceId() {
             let devId = localStorage.getItem('device_telemetry_id');
             if (!devId) {
@@ -57,49 +93,7 @@
         const DEVICE_ID = obtenerDeviceId();
         document.getElementById('devIdDisplay').innerText = DEVICE_ID;
 
-        // 2. Estado de sensores locales
-        const sensores = {
-            lat: 0.0,
-            lon: 0.0,
-            speed: 0,
-            seq: 0,
-            accelX: 0,
-            accelY: 0,
-            netType: 3, // Default: 3 (4G). Rango: 1=2G, 2=3G, 3=4G, 4=WiFi
-            osVer: 14,  // Default: Android 14
-            battery: 100
-        };
-
-        // Captura de Batería Real
-        if ('getBattery' in navigator) {
-            navigator.getBattery().then(bat => {
-                sensores.battery = Math.round(bat.level * 100);
-                bat.addEventListener('levelchange', () => {
-                    sensores.battery = Math.round(bat.level * 100);
-                });
-            });
-        }
-
-        // Captura de Acelerómetro
-        window.addEventListener('devicemotion', (evt) => {
-            if (evt.accelerationIncludingGravity) {
-                sensores.accelX = Math.round((evt.accelerationIncludingGravity.x || 0) * 10);
-                sensores.accelY = Math.round((evt.accelerationIncludingGravity.y || 0) * 10);
-            }
-        });
-
-        // Captura de Tipo de Conexión
-        const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-        if (conn) {
-            if (conn.effectiveType === '2g') sensores.netType = 1;
-            else if (conn.effectiveType === '3g') sensores.netType = 2;
-            else if (conn.effectiveType === '4g') sensores.netType = 3;
-            else sensores.netType = 4;
-        }
-
-        // Captura de Versión de Android
-        const matchOS = navigator.userAgent.match(/Android\s([0-9]+)/);
-        if (matchOS) sensores.osVer = parseInt(matchOS[1], 10);
+        const baseState = { lat: 4.60971, lon: -74.08175, speed: 0, seq: 0, accelX: 0, accelY: 0, netType: 3, osVer: 14, battery: 95 };
 
         function log(msg) {
             const div = document.getElementById('log');
@@ -107,112 +101,145 @@
             div.scrollTop = div.scrollHeight;
         }
 
-        // Empaquetado binario Big-Endian de 16 Bytes
-        function empaquetar16Bytes() {
-            sensores.seq = (sensores.seq + 1) % 65536; // Contador Uint16
-
+        function empaquetar16Bytes(v) {
+            v.seq = (v.seq + 1) % 65536;
             const buffer = new ArrayBuffer(16);
             const view = new DataView(buffer);
 
-            view.setFloat32(0, sensores.lat, false);     // Bytes 0-3: Float32 (Lat)
-            view.setFloat32(4, sensores.lon, false);     // Bytes 4-7: Float32 (Lon)
-            view.setUint8(8, sensores.speed);            // Byte 8:   Uint8   (Vel)
-            view.setUint16(9, sensores.seq, false);      // Bytes 9-10: Uint16 (Seq)
-            view.setInt8(11, sensores.accelX);           // Byte 11:  Int8    (Accel X * 10)
-            view.setInt8(12, sensores.accelY);           // Byte 12:  Int8    (Accel Y * 10)
-            view.setUint8(13, sensores.netType);         // Byte 13:  Uint8   (Red ID)
-            view.setUint8(14, sensores.osVer);           // Byte 14:  Uint8   (Android OS)
-            view.setUint8(15, sensores.battery);         // Byte 15:  Uint8   (% Batería)
+            view.setFloat32(0, v.lat, false);
+            view.setFloat32(4, v.lon, false);
+            view.setUint8(8, v.speed);
+            view.setUint16(9, v.seq, false);
+            view.setInt8(11, v.accelX);
+            view.setInt8(12, v.accelY);
+            view.setUint8(13, v.netType);
+            view.setUint8(14, v.osVer);
+            view.setUint8(15, v.battery);
 
             return buffer;
         }
 
-        async function enviarTrama(buffer) {
+        async function enviarTramaConId(buffer, id) {
             const url = document.getElementById('serverUrl').value.trim();
-            if (!url) {
-                log("⚠️ Ingresa la URL de Ngrok en la casilla superior.");
-                return;
-            }
+            if (!url) return;
 
             try {
                 const res = await fetch(url, {
                     method: 'POST',
                     headers: { 
                         'Content-Type': 'application/octet-stream',
-                        'X-Device-ID': DEVICE_ID // Cabecera para identificar el nodo único
+                        'X-Device-ID': id
                     },
                     body: buffer
                 });
-
-                if (res.ok) {
-                    const hex = [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
-                    log(`✅ <b>Hex (16B):</b> <code>${hex}</code><br>` +
-                        `   📍 Pos: ${sensores.lat.toFixed(5)}, ${sensores.lon.toFixed(5)} | 🏎️ Vel: ${sensores.speed} km/h<br>` +
-                        `   📦 Seq: #${sensores.seq} | 🔋 Bat: ${sensores.battery}% | 📶 Red ID: ${sensores.netType}`);
-                }
+                if (res.ok) totalEnviadosSombra++;
             } catch (err) {
-                log(`❌ Error al transmitir: ${err.message}`);
+                // Silencioso en prueba de estrés para evitar saturación de consola DOM
             }
         }
 
-        // Modo 1: GPS Real del Celular
-        function iniciarGPSReal() {
-            detenerTransmision();
-            if ("geolocation" in navigator) {
-                log("📡 Escuchando GPS nativo del dispositivo...");
-                watchId = navigator.geolocation.watchPosition(pos => {
-                    sensores.lat = pos.coords.latitude;
-                    sensores.lon = pos.coords.longitude;
-                    sensores.speed = Math.round((pos.coords.speed || 0) * 3.6);
-
-                    const buffer = empaquetar16Bytes();
-                    enviarTrama(buffer);
-                }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
-            } else {
-                log("Geolocalización no soportada.");
-            }
+        // Crear instancia de vehículo simulado con movimiento
+        function crearVehiculoSimulado(index) {
+            const id = `Bot-${(index + 1).toString().padStart(4, '0')}`;
+            // Coordenadas esparcidas en Bogotá
+            const lat = 4.60000 + (Math.random() - 0.5) * 0.15;
+            const lon = -74.08000 + (Math.random() - 0.5) * 0.15;
+            return {
+                id: id,
+                lat: lat,
+                lon: lon,
+                speed: Math.floor(20 + Math.random() * 60),
+                seq: 0,
+                accelX: Math.round((Math.random() - 0.5) * 20),
+                accelY: Math.round((Math.random() - 0.5) * 20),
+                netType: Math.floor(Math.random() * 4) + 1,
+                osVer: 14,
+                battery: Math.floor(40 + Math.random() * 60)
+            };
         }
 
-        // Modo 2: Emulador de Vehículo en Ruta
-        function iniciarEmulador() {
-            detenerTransmision();
-            log("🏎️ Iniciando simulación de trayecto...");
-            
-            const ruta = [
-                {lat: 4.60971, lon: -74.08175},
-                {lat: 4.61250, lon: -74.08010},
-                {lat: 4.61580, lon: -74.07820},
-                {lat: 4.61910, lon: -74.07550},
-                {lat: 4.62200, lon: -74.07210}
-            ];
-            let idx = 0, progreso = 0;
+        function moverVehiculo(v) {
+            v.lat += (Math.random() - 0.5) * 0.0005;
+            v.lon += (Math.random() - 0.5) * 0.0005;
+            v.speed = Math.floor(20 + Math.random() * 60);
+        }
 
-            intervalId = setInterval(() => {
-                let p1 = ruta[idx];
-                let p2 = ruta[(idx + 1) % ruta.length];
-                progreso += 0.1;
-                if (progreso >= 1.0) {
-                    progreso = 0;
-                    idx = (idx + 1) % ruta.length;
-                    p1 = ruta[idx];
-                    p2 = ruta[(idx + 1) % ruta.length];
+        function iniciarPruebaEstrés() {
+            detenerTodo();
+            const targetMbps = parseFloat(document.getElementById('targetMbps').value);
+            const rampa = parseInt(document.getElementById('stepVehicles').value);
+            const url = document.getElementById('serverUrl').value.trim();
+
+            if (!url) {
+                log("⚠️ Ingresa la URL del servidor primero.");
+                return;
+            }
+
+            log(`🔥 <b>Iniciando Prueba de Estrés:</b> Objetivo ${targetMbps} Mbps (Rampa +${rampa} veh/seg)...`);
+
+            // Bucle principal de transmisión (Cada 1 segundo dispara todos los vehículos)
+            stressInterval = setInterval(() => {
+                // 1. Agregar más vehículos según la rampa
+                for (let i = 0; i < rampa; i++) {
+                    listaVehiculosSimulados.push(crearVehiculoSimulado(listaVehiculosSimulados.length));
                 }
 
-                sensores.lat = p1.lat + (p2.lat - p1.lat) * progreso;
-                sensores.lon = p1.lon + (p2.lon - p1.lon) * progreso;
-                sensores.speed = Math.floor(30 + Math.sin(sensores.seq) * 20);
-                sensores.accelX = Math.round(Math.sin(sensores.seq * 0.5) * 12);
-                sensores.accelY = Math.round(Math.cos(sensores.seq * 0.3) * 8);
+                // 2. Transmitir el paquete de cada vehículo
+                listaVehiculosSimulados.forEach(v => {
+                    moverVehiculo(v);
+                    const buf = empaquetar16Bytes(v);
+                    enviarTramaConId(buf, v.id);
+                });
 
-                const buffer = empaquetar16Bytes();
-                enviarTrama(buffer);
+            }, 1000);
+
+            // Medidor de métricas en tiempo real (Cada 1 seg)
+            metricsInterval = setInterval(() => {
+                const rps = totalEnviadosSombra;
+                totalEnviadosSombra = 0; // Reset contador
+
+                // Ancho de banda estimado = (Req/s * Bytes por Req * 8 bits) / 1,000,000
+                const mbps = ((rps * EST_BYTES_POR_REQ * 8) / 1000000).toFixed(2);
+
+                document.getElementById('mVehicles').innerText = listaVehiculosSimulados.length;
+                document.getElementById('mRps').innerText = rps;
+                document.getElementById('mMbps').innerText = mbps;
+
+                if (parseFloat(mbps) >= targetMbps) {
+                    log(`⚠️ <b>Límite alcanzado:</b> Se consumieron ${mbps} Mbps con ${listaVehiculosSimulados.length} vehículos.`);
+                }
             }, 1000);
         }
 
-        function detenerTransmision() {
+        function iniciarGPSReal() {
+            detenerTodo();
+            if ("geolocation" in navigator) {
+                log("📡 Modo GPS Celular activado...");
+                watchId = navigator.geolocation.watchPosition(pos => {
+                    baseState.lat = pos.coords.latitude;
+                    baseState.lon = pos.coords.longitude;
+                    baseState.speed = Math.round((pos.coords.speed || 0) * 3.6);
+
+                    const buffer = empaquetar16Bytes(baseState);
+                    enviarTramaConId(buffer, DEVICE_ID);
+                    log(`📍 [GPS Real] Lat: ${baseState.lat.toFixed(4)}, Lon: ${baseState.lon.toFixed(4)}`);
+                }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
+            }
+        }
+
+        function detenerTodo() {
             if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
-            if (intervalId !== null) { clearInterval(intervalId); intervalId = null; }
-            log("⏹ Transmisión detenida.");
+            if (stressInterval !== null) { clearInterval(stressInterval); stressInterval = null; }
+            if (metricsInterval !== null) { clearInterval(metricsInterval); metricsInterval = null; }
+            
+            listaVehiculosSimulados = [];
+            totalEnviadosSombra = 0;
+
+            document.getElementById('mVehicles').innerText = "0";
+            document.getElementById('mRps').innerText = "0";
+            document.getElementById('mMbps').innerText = "0.00";
+
+            log("⏹ Prueba/Transmisión detenida.");
         }
     </script>
 </body>
