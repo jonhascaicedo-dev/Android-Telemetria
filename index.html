@@ -3,121 +3,169 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Emisor Telemetría 12-Bytes</title>
+    <title>Telemetría de Campo (16 Bytes)</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #121212; color: #fff; }
-        button { padding: 12px 20px; margin: 8px 0; font-size: 16px; width: 100%; cursor: pointer; }
-        .log { background: #000; padding: 10px; font-family: monospace; height: 180px; overflow-y: scroll; border: 1px solid #333; }
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 15px; background: #121212; color: #fff; margin: 0; }
+        .card { background: #1e1e1e; padding: 14px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333; }
+        label { display: block; font-size: 13px; margin-bottom: 6px; color: #aaa; }
+        input { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #fff; }
+        button { width: 100%; padding: 12px; margin: 6px 0; font-size: 15px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; }
+        .btn-start { background-color: #2e7d32; color: #fff; }
+        .btn-stop { background-color: #c62828; color: #fff; }
+        .log { background: #000; padding: 10px; font-family: monospace; height: 320px; overflow-y: auto; border: 1px solid #333; font-size: 12px; border-radius: 6px; }
+        hr { border: 0; border-top: 1px solid #222; margin: 6px 0; }
     </style>
 </head>
 <body>
-    <h2>📡 Emisor de Telemetría (12 Bytes)</h2>
-    
-    <label>IP / Dominio de tu servidor (ISP):</label>
-    <input type="text" id="serverIp" value="http://192.168.43.237:8080" style="width: 100%; padding: 8px; margin-bottom: 10px;">
+    <h2>📡 Emisor de Telemetría Real (16 Bytes)</h2>
 
-    <button onclick="iniciarGPS()" style="background-color: #2e7d32; color: white;">▶ Iniciar GPS Real</button>
-    <button onclick="iniciarEstrés()" style="background-color: #c62828; color: white;">⚡ Modo Prueba de Estrés (10 req/s)</button>
-    <button onclick="detener()" style="background-color: #555; color: white;">⏹ Detener</button>
+    <div class="card">
+        <label for="serverUrl">URL del Servidor / Ngrok (HTTPS):</label>
+        <input type="text" id="serverUrl" placeholder="https://tu-subdominio.ngrok-free.dev">
+    </div>
 
-    <h3>Consola:</h3>
+    <div class="card">
+        <button class="btn-start" onclick="iniciarRastreo()">📍 Iniciar Transmisión GPS + Sensores</button>
+        <button class="btn-stop" onclick="detenerRastreo()">⏹ Detener Transmisión</button>
+    </div>
+
+    <h3>Consola de Estado:</h3>
     <div id="log" class="log"></div>
 
-  <script>
-    let intervalId = null;
-    let watchId = null;
+    <script>
+        let watchId = null;
 
-    function log(msg) {
-        const div = document.getElementById('log');
-        div.innerHTML += msg + "<br><hr style='border:0; border-top:1px solid #333; margin: 5px 0;'>";
-        div.scrollTop = div.scrollHeight;
-    }
+        // Lectura activa de los sensores del teléfono
+        const sensores = {
+            lat: 0.0,
+            lon: 0.0,
+            speed: 0,
+            seq: 0,
+            accelX: 0,
+            accelY: 0,
+            netType: 3, // Default 4G (1=2G, 2=3G, 3=4G, 4=WiFi)
+            osVer: 14,  // Default Android 14
+            battery: 100
+        };
 
-    // Empaquetado estricto a ArrayBuffer de 12 bytes
-    function crearPaquete12Bytes(lat, lon, speed, temp, weatherId, eventId) {
-        const buffer = new ArrayBuffer(12);
-        const view = new DataView(buffer);
-
-        view.setFloat32(0, lat, false);       // Bytes 0-3: Latitud (Float32, Big-Endian)
-        view.setFloat32(4, lon, false);       // Bytes 4-7: Longitud (Float32, Big-Endian)
-        view.setUint8(8, speed);              // Byte 8:   Velocidad (Uint8)
-        view.setInt8(9, temp);                // Byte 9:   Temperatura (Int8)
-        view.setUint8(10, weatherId);         // Byte 10:  Weather ID (Uint8)
-        view.setUint8(11, eventId);           // Byte 11:  Event ID (Uint8)
-
-        return buffer;
-    }
-
-    // Decodifica la trama localmente para renderizarla en la consola visual
-    function formatearTrama(buffer) {
-        const view = new DataView(buffer);
-        
-        const lat = view.getFloat32(0, false);
-        const lon = view.getFloat32(4, false);
-        const speed = view.getUint8(8);
-        const temp = view.getInt8(9);
-        const weatherId = view.getUint8(10);
-        const eventId = view.getUint8(11);
-
-        const hexStr = [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
-
-        return `✅ <b>Trama Hex (12B):</b> <code>${hexStr}</code><br>` +
-               `   📍 <b>Latitud:</b> ${lat.toFixed(6)} | <b>Longitud:</b> ${lon.toFixed(6)}<br>` +
-               `   🏎️ <b>Velocidad:</b> ${speed} km/h | 🌡️ <b>Temp:</b> ${temp}°C<br>` +
-               `   🌤️ <b>Clima ID:</b> ${weatherId} | ⚠️ <b>Evento:</b> ${eventId}`;
-    }
-
-    async function enviarTrama(buffer) {
-        const endpoint = document.getElementById('serverIp').value;
-        try {
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/octet-stream' },
-                body: buffer
+        // 1. Detección de Batería real
+        if ('getBattery' in navigator) {
+            navigator.getBattery().then(bat => {
+                sensores.battery = Math.round(bat.level * 100);
+                bat.addEventListener('levelchange', () => {
+                    sensores.battery = Math.round(bat.level * 100);
+                });
             });
-            if (response.ok) {
-                log(formatearTrama(buffer));
+        }
+
+        // 2. Detección de Acelerómetro (Movimiento del vehículo)
+        window.addEventListener('devicemotion', (evt) => {
+            if (evt.accelerationIncludingGravity) {
+                sensores.accelX = Math.round((evt.accelerationIncludingGravity.x || 0) * 10);
+                sensores.accelY = Math.round((evt.accelerationIncludingGravity.y || 0) * 10);
             }
-        } catch (err) {
-            log(`❌ Error de conexión: ${err.message}`);
+        });
+
+        // 3. Detección del tipo de conexión
+        function detectarRed() {
+            const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (conn) {
+                switch (conn.effectiveType) {
+                    case '2g': sensores.netType = 1; break;
+                    case '3g': sensores.netType = 2; break;
+                    case '4g': sensores.netType = 3; break;
+                    default:   sensores.netType = 4; // WiFi / Ethernet
+                }
+            }
         }
-    }
 
-    function iniciarGPS() {
-        detener();
-        if ("geolocation" in navigator) {
-            log("📡 Iniciando rastreo GPS...");
-            watchId = navigator.geolocation.watchPosition(pos => {
-                const buffer = crearPaquete12Bytes(
-                    pos.coords.latitude,
-                    pos.coords.longitude,
-                    Math.round((pos.coords.speed || 0) * 3.6), // m/s a km/h
-                    22, // Temperatura simulada
-                    1,  // WeatherID
-                    0   // Evento
-                );
-                enviarTrama(buffer);
-            }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
-        } else {
-            log("Geolocalización no soportada en este navegador.");
+        // 4. Detección de Versión Android
+        function detectarAndroidOS() {
+            const match = navigator.userAgent.match(/Android\s([0-9]+)/);
+            if (match) {
+                sensores.osVer = parseInt(match[1], 10);
+            }
         }
-    }
 
-    function iniciarEstrés() {
-        detener();
-        log("🚀 Iniciando prueba de estrés masiva...");
-        intervalId = setInterval(() => {
-            // Datos simulados para la prueba de carga
-            const buffer = crearPaquete12Bytes(4.609712, -74.081754, 85, 18, 1, 2);
-            enviarTrama(buffer);
-        }, 100); // 10 peticiones por segundo
-    }
+        detectarRed();
+        detectarAndroidOS();
 
-    function detener() {
-        if (intervalId) clearInterval(intervalId);
-        if (watchId) navigator.geolocation.clearWatch(watchId);
-        log("⏹ Transmisión detenida.");
-    }
-</script>
+        function log(msg) {
+            const div = document.getElementById('log');
+            div.innerHTML += msg + "<br><hr>";
+            div.scrollTop = div.scrollHeight;
+        }
+
+        // Empaquetado binario estricto de 16 Bytes (Big-Endian)
+        function construirPayload16Bytes() {
+            sensores.seq = (sensores.seq + 1) % 65536; // Incremento de contador (0 a 65535)
+
+            const buffer = new ArrayBuffer(16);
+            const view = new DataView(buffer);
+
+            view.setFloat32(0, sensores.lat, false);     // Bytes 0-3: Float32 (Latitud)
+            view.setFloat32(4, sensores.lon, false);     // Bytes 4-7: Float32 (Longitud)
+            view.setUint8(8, sensores.speed);            // Byte 8:   Uint8   (Velocidad km/h)
+            view.setUint16(9, sensores.seq, false);      // Bytes 9-10: Uint16 (Secuencia)
+            view.setInt8(11, sensores.accelX);           // Byte 11:  Int8    (Accel X * 10)
+            view.setInt8(12, sensores.accelY);           // Byte 12:  Int8    (Accel Y * 10)
+            view.setUint8(13, sensores.netType);         // Byte 13:  Uint8   (Tipo Red)
+            view.setUint8(14, sensores.osVer);           // Byte 14:  Uint8   (Versión SO)
+            view.setUint8(15, sensores.battery);         // Byte 15:  Uint8   (% Batería)
+
+            return buffer;
+        }
+
+        async function enviarPayload(buffer) {
+            const url = document.getElementById('serverUrl').value.trim();
+            if (!url) {
+                log("⚠️ Ingresa la URL de tu servidor Ngrok.");
+                return;
+            }
+
+            try {
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: buffer
+                });
+
+                if (res.ok) {
+                    const hex = [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
+                    log(`✅ <b>Hex (16B):</b> <code>${hex}</code><br>` +
+                        `   📍 Lat: ${sensores.lat.toFixed(5)}, Lon: ${sensores.lon.toFixed(5)}<br>` +
+                        `   🏎️ Vel: ${sensores.speed} km/h | 📦 Seq: #${sensores.seq} | 🔋 Bat: ${sensores.battery}%<br>` +
+                        `   📶 Red ID: ${sensores.netType} | 🤖 Android: v${sensores.osVer}`);
+                }
+            } catch (err) {
+                log(`❌ Error al transmitir: ${err.message}`);
+            }
+        }
+
+        function iniciarRastreo() {
+            detenerRastreo();
+            if ("geolocation" in navigator) {
+                log("📡 Capturando GPS y transmitiendo sensores...");
+                watchId = navigator.geolocation.watchPosition(pos => {
+                    sensores.lat = pos.coords.latitude;
+                    sensores.lon = pos.coords.longitude;
+                    sensores.speed = Math.round((pos.coords.speed || 0) * 3.6); // Convertir m/s a km/h
+
+                    const buffer = construirPayload16Bytes();
+                    enviarPayload(buffer);
+                }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
+            } else {
+                log("La geolocalización no está disponible.");
+            }
+        }
+
+        function detenerRastreo() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+            log("⏹ Transmisión detenida.");
+        }
+    </script>
 </body>
 </html>
