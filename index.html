@@ -23,81 +23,101 @@
     <h3>Consola:</h3>
     <div id="log" class="log"></div>
 
-    <script>
-        let intervalId = null;
-        let watchId = null;
+  <script>
+    let intervalId = null;
+    let watchId = null;
 
-        function log(msg) {
-            const div = document.getElementById('log');
-            div.innerHTML += msg + "<br>";
-            div.scrollTop = div.scrollHeight;
-        }
+    function log(msg) {
+        const div = document.getElementById('log');
+        div.innerHTML += msg + "<br><hr style='border:0; border-top:1px solid #333; margin: 5px 0;'>";
+        div.scrollTop = div.scrollHeight;
+    }
 
-        // Empaquetado estricto a ArrayBuffer de 12 bytes
-        function crearPaquete12Bytes(lat, lon, speed, temp, weatherId, eventId) {
-            const buffer = new ArrayBuffer(12);
-            const view = new DataView(buffer);
+    // Empaquetado estricto a ArrayBuffer de 12 bytes
+    function crearPaquete12Bytes(lat, lon, speed, temp, weatherId, eventId) {
+        const buffer = new ArrayBuffer(12);
+        const view = new DataView(buffer);
 
-            view.setFloat32(0, lat, false);       // 4 Bytes: Float32 (Big-Endian)
-            view.setFloat32(4, lon, false);       // 4 Bytes: Float32 (Big-Endian)
-            view.setUint8(8, speed);              // 1 Byte: Uint8
-            view.setInt8(9, temp);                // 1 Byte: Int8
-            view.setUint8(10, weatherId);         // 1 Byte: Uint8
-            view.setUint8(11, eventId);           // 1 Byte: Uint8
+        view.setFloat32(0, lat, false);       // Bytes 0-3: Latitud (Float32, Big-Endian)
+        view.setFloat32(4, lon, false);       // Bytes 4-7: Longitud (Float32, Big-Endian)
+        view.setUint8(8, speed);              // Byte 8:   Velocidad (Uint8)
+        view.setInt8(9, temp);                // Byte 9:   Temperatura (Int8)
+        view.setUint8(10, weatherId);         // Byte 10:  Weather ID (Uint8)
+        view.setUint8(11, eventId);           // Byte 11:  Event ID (Uint8)
 
-            return buffer;
-        }
+        return buffer;
+    }
 
-        async function enviarTrama(buffer) {
-            const endpoint = document.getElementById('serverIp').value;
-            try {
-                const response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/octet-stream' },
-                    body: buffer
-                });
-                if (response.ok) {
-                    log(`✅ Enviados 12 bytes hex: ${[...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('')}`);
-                }
-            } catch (err) {
-                log(`❌ Error de conexión: ${err.message}`);
+    // Decodifica la trama localmente para renderizarla en la consola visual
+    function formatearTrama(buffer) {
+        const view = new DataView(buffer);
+        
+        const lat = view.getFloat32(0, false);
+        const lon = view.getFloat32(4, false);
+        const speed = view.getUint8(8);
+        const temp = view.getInt8(9);
+        const weatherId = view.getUint8(10);
+        const eventId = view.getUint8(11);
+
+        const hexStr = [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
+
+        return `✅ <b>Trama Hex (12B):</b> <code>${hexStr}</code><br>` +
+               `   📍 <b>Latitud:</b> ${lat.toFixed(6)} | <b>Longitud:</b> ${lon.toFixed(6)}<br>` +
+               `   🏎️ <b>Velocidad:</b> ${speed} km/h | 🌡️ <b>Temp:</b> ${temp}°C<br>` +
+               `   🌤️ <b>Clima ID:</b> ${weatherId} | ⚠️ <b>Evento:</b> ${eventId}`;
+    }
+
+    async function enviarTrama(buffer) {
+        const endpoint = document.getElementById('serverIp').value;
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: buffer
+            });
+            if (response.ok) {
+                log(formatearTrama(buffer));
             }
+        } catch (err) {
+            log(`❌ Error de conexión: ${err.message}`);
         }
+    }
 
-        function iniciarGPS() {
-            detener();
-            if ("geolocation" in navigator) {
-                log("📡 Iniciando rastreo GPS...");
-                watchId = navigator.geolocation.watchPosition(pos => {
-                    const buffer = crearPaquete12Bytes(
-                        pos.coords.latitude,
-                        pos.coords.longitude,
-                        Math.round((pos.coords.speed || 0) * 3.6), // m/s a km/h
-                        22, // Temperatura simulada
-                        1,  // WeatherID
-                        0   // Evento
-                    );
-                    enviarTrama(buffer);
-                }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
-            } else {
-                log("Geolocalización no soportada en este navegador.");
-            }
-        }
-
-        function iniciarEstrés() {
-            detener();
-            log("🚀 Iniciando prueba de estrés masiva...");
-            intervalId = setInterval(() => {
-                const buffer = crearPaquete12Bytes(4.6097, -74.0817, 85, 18, 1, 2);
+    function iniciarGPS() {
+        detener();
+        if ("geolocation" in navigator) {
+            log("📡 Iniciando rastreo GPS...");
+            watchId = navigator.geolocation.watchPosition(pos => {
+                const buffer = crearPaquete12Bytes(
+                    pos.coords.latitude,
+                    pos.coords.longitude,
+                    Math.round((pos.coords.speed || 0) * 3.6), // m/s a km/h
+                    22, // Temperatura simulada
+                    1,  // WeatherID
+                    0   // Evento
+                );
                 enviarTrama(buffer);
-            }, 100); // Envia 10 paquetes por segundo por cliente
+            }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
+        } else {
+            log("Geolocalización no soportada en este navegador.");
         }
+    }
 
-        function detener() {
-            if (intervalId) clearInterval(intervalId);
-            if (watchId) navigator.geolocation.clearWatch(watchId);
-            log("⏹ Transmisión detenida.");
-        }
-    </script>
+    function iniciarEstrés() {
+        detener();
+        log("🚀 Iniciando prueba de estrés masiva...");
+        intervalId = setInterval(() => {
+            // Datos simulados para la prueba de carga
+            const buffer = crearPaquete12Bytes(4.609712, -74.081754, 85, 18, 1, 2);
+            enviarTrama(buffer);
+        }, 100); // 10 peticiones por segundo
+    }
+
+    function detener() {
+        if (intervalId) clearInterval(intervalId);
+        if (watchId) navigator.geolocation.clearWatch(watchId);
+        log("⏹ Transmisión detenida.");
+    }
+</script>
 </body>
 </html>
