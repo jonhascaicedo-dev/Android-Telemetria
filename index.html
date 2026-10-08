@@ -3,21 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Telemetría de Campo (16 Bytes)</title>
+    <title>Emisor de Telemetría (16 Bytes)</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; padding: 15px; background: #121212; color: #fff; margin: 0; }
         .card { background: #1e1e1e; padding: 14px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333; }
         label { display: block; font-size: 13px; margin-bottom: 6px; color: #aaa; }
         input { width: 100%; padding: 10px; font-size: 14px; box-sizing: border-box; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #fff; }
-        button { width: 100%; padding: 12px; margin: 6px 0; font-size: 15px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; }
-        .btn-start { background-color: #2e7d32; color: #fff; }
+        button { width: 100%; padding: 12px; margin: 5px 0; font-size: 15px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; }
+        .btn-gps { background-color: #2e7d32; color: #fff; }
+        .btn-emu { background-color: #0288d1; color: #fff; }
         .btn-stop { background-color: #c62828; color: #fff; }
-        .log { background: #000; padding: 10px; font-family: monospace; height: 320px; overflow-y: auto; border: 1px solid #333; font-size: 12px; border-radius: 6px; }
+        .log { background: #000; padding: 10px; font-family: monospace; height: 280px; overflow-y: auto; border: 1px solid #333; font-size: 12px; border-radius: 6px; }
+        .dev-badge { background: #333; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; color: #4caf50; }
         hr { border: 0; border-top: 1px solid #222; margin: 6px 0; }
     </style>
 </head>
 <body>
-    <h2>📡 Emisor de Telemetría Real (16 Bytes)</h2>
+    <h2>📡 Emisor de Telemetría Avanzada</h2>
+
+    <div class="card">
+        <label>Identificador de Dispositivo:</label>
+        <span id="devIdDisplay" class="dev-badge">Cargando ID...</span>
+    </div>
 
     <div class="card">
         <label for="serverUrl">URL del Servidor / Ngrok (HTTPS):</label>
@@ -25,17 +32,32 @@
     </div>
 
     <div class="card">
-        <button class="btn-start" onclick="iniciarRastreo()">📍 Iniciar Transmisión GPS + Sensores</button>
-        <button class="btn-stop" onclick="detenerRastreo()">⏹ Detener Transmisión</button>
+        <button class="btn-gps" onclick="iniciarGPSReal()">📍 GPS Real + Sensores del Móvil</button>
+        <button class="btn-emu" onclick="iniciarEmulador()">🏎️ Emular Ruta de Vehículo</button>
+        <button class="btn-stop" onclick="detenerTransmision()">⏹ Detener Transmisión</button>
     </div>
 
-    <h3>Consola de Estado:</h3>
+    <h3>Consola de Registro:</h3>
     <div id="log" class="log"></div>
 
     <script>
         let watchId = null;
+        let intervalId = null;
 
-        // Lectura activa de los sensores del teléfono
+        // 1. Obtener o generar un ID único persistente por teléfono/navegador
+        function obtenerDeviceId() {
+            let devId = localStorage.getItem('device_telemetry_id');
+            if (!devId) {
+                devId = 'Dev-' + Math.floor(1000 + Math.random() * 9000);
+                localStorage.setItem('device_telemetry_id', devId);
+            }
+            return devId;
+        }
+
+        const DEVICE_ID = obtenerDeviceId();
+        document.getElementById('devIdDisplay').innerText = DEVICE_ID;
+
+        // 2. Estado de sensores locales
         const sensores = {
             lat: 0.0,
             lon: 0.0,
@@ -43,12 +65,12 @@
             seq: 0,
             accelX: 0,
             accelY: 0,
-            netType: 3, // Default 4G (1=2G, 2=3G, 3=4G, 4=WiFi)
-            osVer: 14,  // Default Android 14
+            netType: 3, // Default: 3 (4G). Rango: 1=2G, 2=3G, 3=4G, 4=WiFi
+            osVer: 14,  // Default: Android 14
             battery: 100
         };
 
-        // 1. Detección de Batería real
+        // Captura de Batería Real
         if ('getBattery' in navigator) {
             navigator.getBattery().then(bat => {
                 sensores.battery = Math.round(bat.level * 100);
@@ -58,7 +80,7 @@
             });
         }
 
-        // 2. Detección de Acelerómetro (Movimiento del vehículo)
+        // Captura de Acelerómetro
         window.addEventListener('devicemotion', (evt) => {
             if (evt.accelerationIncludingGravity) {
                 sensores.accelX = Math.round((evt.accelerationIncludingGravity.x || 0) * 10);
@@ -66,29 +88,18 @@
             }
         });
 
-        // 3. Detección del tipo de conexión
-        function detectarRed() {
-            const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-            if (conn) {
-                switch (conn.effectiveType) {
-                    case '2g': sensores.netType = 1; break;
-                    case '3g': sensores.netType = 2; break;
-                    case '4g': sensores.netType = 3; break;
-                    default:   sensores.netType = 4; // WiFi / Ethernet
-                }
-            }
+        // Captura de Tipo de Conexión
+        const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (conn) {
+            if (conn.effectiveType === '2g') sensores.netType = 1;
+            else if (conn.effectiveType === '3g') sensores.netType = 2;
+            else if (conn.effectiveType === '4g') sensores.netType = 3;
+            else sensores.netType = 4;
         }
 
-        // 4. Detección de Versión Android
-        function detectarAndroidOS() {
-            const match = navigator.userAgent.match(/Android\s([0-9]+)/);
-            if (match) {
-                sensores.osVer = parseInt(match[1], 10);
-            }
-        }
-
-        detectarRed();
-        detectarAndroidOS();
+        // Captura de Versión de Android
+        const matchOS = navigator.userAgent.match(/Android\s([0-9]+)/);
+        if (matchOS) sensores.osVer = parseInt(matchOS[1], 10);
 
         function log(msg) {
             const div = document.getElementById('log');
@@ -96,84 +107,113 @@
             div.scrollTop = div.scrollHeight;
         }
 
-        // Empaquetado binario estricto de 16 Bytes (Big-Endian)
-        function construirPayload16Bytes() {
-            sensores.seq = (sensores.seq + 1) % 65536; // Incremento de contador (0 a 65535)
+        // Empaquetado binario Big-Endian de 16 Bytes
+        function empaquetar16Bytes() {
+            sensores.seq = (sensores.seq + 1) % 65536; // Contador Uint16
 
             const buffer = new ArrayBuffer(16);
             const view = new DataView(buffer);
 
-            view.setFloat32(0, sensores.lat, false);     // Bytes 0-3: Float32 (Latitud)
-            view.setFloat32(4, sensores.lon, false);     // Bytes 4-7: Float32 (Longitud)
-            view.setUint8(8, sensores.speed);            // Byte 8:   Uint8   (Velocidad km/h)
-            view.setUint16(9, sensores.seq, false);      // Bytes 9-10: Uint16 (Secuencia)
+            view.setFloat32(0, sensores.lat, false);     // Bytes 0-3: Float32 (Lat)
+            view.setFloat32(4, sensores.lon, false);     // Bytes 4-7: Float32 (Lon)
+            view.setUint8(8, sensores.speed);            // Byte 8:   Uint8   (Vel)
+            view.setUint16(9, sensores.seq, false);      // Bytes 9-10: Uint16 (Seq)
             view.setInt8(11, sensores.accelX);           // Byte 11:  Int8    (Accel X * 10)
             view.setInt8(12, sensores.accelY);           // Byte 12:  Int8    (Accel Y * 10)
-            view.setUint8(13, sensores.netType);         // Byte 13:  Uint8   (Tipo Red)
-            view.setUint8(14, sensores.osVer);           // Byte 14:  Uint8   (Versión SO)
+            view.setUint8(13, sensores.netType);         // Byte 13:  Uint8   (Red ID)
+            view.setUint8(14, sensores.osVer);           // Byte 14:  Uint8   (Android OS)
             view.setUint8(15, sensores.battery);         // Byte 15:  Uint8   (% Batería)
 
             return buffer;
         }
 
-       // Obtener o generar un ID único persistente para este navegador/teléfono
-function obtenerDeviceId() {
-    let devId = localStorage.getItem('device_telemetry_id');
-    if (!devId) {
-        devId = 'Dev-' + Math.floor(1000 + Math.random() * 9000);
-        localStorage.setItem('device_telemetry_id', devId);
-    }
-    return devId;
-}
+        async function enviarTrama(buffer) {
+            const url = document.getElementById('serverUrl').value.trim();
+            if (!url) {
+                log("⚠️ Ingresa la URL de Ngrok en la casilla superior.");
+                return;
+            }
 
-// Modifica la función de envío para incluir la cabecera X-Device-ID:
-async function enviarPayload(buffer) {
-    const url = document.getElementById('serverUrl').value.trim();
-    if (!url) return;
+            try {
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/octet-stream',
+                        'X-Device-ID': DEVICE_ID // Cabecera para identificar el nodo único
+                    },
+                    body: buffer
+                });
 
-    try {
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 
-                'Content-Type': 'application/octet-stream',
-                'X-Device-ID': obtenerDeviceId() // 👈 ID único enviado al servidor
-            },
-            body: buffer
-        });
-        if (res.ok) {
-            // ... resto de tu log ...
+                if (res.ok) {
+                    const hex = [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
+                    log(`✅ <b>Hex (16B):</b> <code>${hex}</code><br>` +
+                        `   📍 Pos: ${sensores.lat.toFixed(5)}, ${sensores.lon.toFixed(5)} | 🏎️ Vel: ${sensores.speed} km/h<br>` +
+                        `   📦 Seq: #${sensores.seq} | 🔋 Bat: ${sensores.battery}% | 📶 Red ID: ${sensores.netType}`);
+                }
+            } catch (err) {
+                log(`❌ Error al transmitir: ${err.message}`);
+            }
         }
-    } catch (err) {
-        log(`❌ Error al transmitir: ${err.message}`);
-    }
-}
 
-        function iniciarRastreo() {
-            detenerRastreo();
+        // Modo 1: GPS Real del Celular
+        function iniciarGPSReal() {
+            detenerTransmision();
             if ("geolocation" in navigator) {
-                log("📡 Capturando GPS y transmitiendo sensores...");
+                log("📡 Escuchando GPS nativo del dispositivo...");
                 watchId = navigator.geolocation.watchPosition(pos => {
                     sensores.lat = pos.coords.latitude;
                     sensores.lon = pos.coords.longitude;
-                    sensores.speed = Math.round((pos.coords.speed || 0) * 3.6); // Convertir m/s a km/h
+                    sensores.speed = Math.round((pos.coords.speed || 0) * 3.6);
 
-                    const buffer = construirPayload16Bytes();
-                    enviarPayload(buffer);
+                    const buffer = empaquetar16Bytes();
+                    enviarTrama(buffer);
                 }, err => log("Error GPS: " + err.message), { enableHighAccuracy: true });
             } else {
-                log("La geolocalización no está disponible.");
+                log("Geolocalización no soportada.");
             }
         }
 
-        function detenerRastreo() {
-            if (watchId !== null) {
-                navigator.geolocation.clearWatch(watchId);
-                watchId = null;
-            }
+        // Modo 2: Emulador de Vehículo en Ruta
+        function iniciarEmulador() {
+            detenerTransmision();
+            log("🏎️ Iniciando simulación de trayecto...");
+            
+            const ruta = [
+                {lat: 4.60971, lon: -74.08175},
+                {lat: 4.61250, lon: -74.08010},
+                {lat: 4.61580, lon: -74.07820},
+                {lat: 4.61910, lon: -74.07550},
+                {lat: 4.62200, lon: -74.07210}
+            ];
+            let idx = 0, progreso = 0;
+
+            intervalId = setInterval(() => {
+                let p1 = ruta[idx];
+                let p2 = ruta[(idx + 1) % ruta.length];
+                progreso += 0.1;
+                if (progreso >= 1.0) {
+                    progreso = 0;
+                    idx = (idx + 1) % ruta.length;
+                    p1 = ruta[idx];
+                    p2 = ruta[(idx + 1) % ruta.length];
+                }
+
+                sensores.lat = p1.lat + (p2.lat - p1.lat) * progreso;
+                sensores.lon = p1.lon + (p2.lon - p1.lon) * progreso;
+                sensores.speed = Math.floor(30 + Math.sin(sensores.seq) * 20);
+                sensores.accelX = Math.round(Math.sin(sensores.seq * 0.5) * 12);
+                sensores.accelY = Math.round(Math.cos(sensores.seq * 0.3) * 8);
+
+                const buffer = empaquetar16Bytes();
+                enviarTrama(buffer);
+            }, 1000);
+        }
+
+        function detenerTransmision() {
+            if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+            if (intervalId !== null) { clearInterval(intervalId); intervalId = null; }
             log("⏹ Transmisión detenida.");
         }
-
-        
     </script>
 </body>
 </html>
