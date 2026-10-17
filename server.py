@@ -2,10 +2,155 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import struct
 import json
 import time
+import queue
+import threading
+import mysql.connector
+from mysql.connector import pooling
 
-# Memoria para los dispositivos activos en el mapa
+# ------------------------------------------------------------------
+# CONFIGURACIÓN DE BASE DE DATOS (phpMyAdmin / MySQL)
+# ------------------------------------------------------------------
+DB_CONFIG = {
+    "host": "localhost",
+    "user": "root",
+    "password": "",  # Cambia esto si tu MySQL tiene contraseña
+    "database": "telemetria_db",
+    "port": 3306
+}
+
+# Pool de conexiones MySQL para alto rendimiento
+try:
+    db_pool = mysql.connector.pooling.MySQLConnectionPool(
+        pool_name="telemetry_pool",
+        pool_size=5,
+        **DB_CONFIG
+    )
+except Exception as e:
+    print(f"⚠️ [Advertencia BD] No se pudo inicializar el pool MySQL: {e}")
+
+# ------------------------------------------------------------------
+# COLAS DE MEMORIA (DESACOPLAMIENTO DE LA TUBERÍA)
+# ------------------------------------------------------------------
+queue_raw = queue.Queue(maxsize=50000)        # Hilo 1 -> Hilo 2
+queue_validated = queue.Queue(maxsize=50000)  # Hilo 2 -> Hilo 3
+queue_sql_batch = queue.Queue(maxsize=50000)  # Hilo 3 -> Hilo 4
+
+# Memoria global para el mapa en tiempo real
 vehiculos_activos = {}
 
+# ------------------------------------------------------------------
+# HILO 2: VALIDADOR DE INTEGRIDAD Y ENCABEZADOS
+# ------------------------------------------------------------------
+def worker_validador():
+    print("🟢 [Thread-2] Validador de Integridad iniciado.")
+    while True:
+        item = queue_raw.get()
+        if item is None: break
+
+        headers, payload, timestamp = item
+
+        # Validar tamaño estricto de 16 bytes
+        if len(payload) == 16:
+            device_id = headers.get('X-Device-ID')
+            if not device_id:
+                forwarded_ip = headers.get('X-Forwarded-For')
+                device_id = f"Movil_{forwarded_ip if forwarded_ip else 'Unknown'}"
+
+            queue_validated.put((device_id, payload, timestamp))
+        else:
+            print(f"⚠️ [Validador] Trama descartada por tamaño incorrecto: {len(payload)}B")
+
+        queue_raw.task_done()
+
+# ------------------------------------------------------------------
+# HILO 3: FORMATEADOR Y DESEMPAQUETADOR BINARIO (UNPACKER)
+# ------------------------------------------------------------------
+def worker_formateador():
+    print("🟢 [Thread-3] Formateador SQL iniciado.")
+    while True:
+        item = queue_validated.get()
+        if item is None: break
+
+        device_id, payload, timestamp = item
+
+        try:
+            # Desempaquetado Big-Endian de 16 Bytes: !ffBHbbBBB
+            lat, lon, speed, seq, accel_x, accel_y, net_type, os_ver, battery = struct.unpack("!ffBHbbBBB", payload)
+            accel_x_val = round(accel_x / 10.0, 1)
+            accel_y_val = round(accel_y / 10.0, 1)
+
+            # Actualizar estado en memoria para el Mapa Leaflet
+            vehiculos_activos[device_id] = {
+                "lat": lat,
+                "lon": lon,
+                "speed": speed,
+                "seq": seq,
+                "accel_x": accel_x_val,
+                "accel_y": accel_y_val,
+                "net_type": net_type,
+                "os_ver": os_ver,
+                "battery": battery,
+                "timestamp": timestamp
+            }
+
+            # Tupla optimizada para inserción SQL
+            registro_sql = (
+                device_id, lat, lon, speed, seq,
+                accel_x_val, accel_y_val, net_type, os_ver, battery
+            )
+
+            queue_sql_batch.put(registro_sql)
+
+        except Exception as e:
+            print(f"❌ [Formateador Error] No se pudo desempaquetar payload: {e}")
+
+        queue_validated.task_done()
+
+# ------------------------------------------------------------------
+# HILO 4: ESCRITOR EN BASE DE DATOS (BULK INSERT)
+# ------------------------------------------------------------------
+def worker_persistencia_db():
+    print("🟢 [Thread-4] Persistencia MySQL (Escritor Batch) iniciado.")
+    
+    INSERT_QUERY = """
+        INSERT INTO lecturas_telemetria 
+        (device_id, lat, lon, speed, seq, accel_x, accel_y, net_type, os_ver, battery)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    batch = []
+    last_flush = time.time()
+
+    while True:
+        try:
+            item = queue_sql_batch.get(timeout=0.2)
+            if item is None: break
+            batch.append(item)
+            queue_sql_batch.task_done()
+        except queue.Empty:
+            pass
+
+        # Volcado a MySQL si se acumulan 100 registros o pasan 0.5 segundos
+        if len(batch) >= 100 or (len(batch) > 0 and (time.time() - last_flush) > 0.5):
+            conn = None
+            try:
+                conn = db_pool.get_connection()
+                cursor = conn.cursor()
+                cursor.executemany(INSERT_QUERY, batch)
+                conn.commit()
+                cursor.close()
+            except Exception as e:
+                print(f"❌ [DB Error] Falló el bulk insert en MySQL: {e}")
+            finally:
+                if conn and conn.is_connected():
+                    conn.close()
+            
+            batch.clear()
+            last_flush = time.time()
+
+# ------------------------------------------------------------------
+# INTERFAZ WEB CON MAPA INTERACTIVO (LEAFLET.JS)
+# ------------------------------------------------------------------
 MAPA_HTML = """
 <!DOCTYPE html>
 <html lang="es">
@@ -96,42 +241,22 @@ MAPA_HTML = """
 </html>
 """
 
+# ------------------------------------------------------------------
+# HILO 1: SERVIDOR HTTP / RECEPTOR DE TRAMAS
+# ------------------------------------------------------------------
 class TelemetryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         payload = self.rfile.read(content_length)
 
-        # Habilitar CORS incluyendo la cabecera personalizada X-Device-ID
+        # Encolar inmediatamente el payload crudo sin bloquear la respuesta HTTP
+        queue_raw.put((self.headers, payload, time.time()))
+
+        # Responder de inmediato con 200 OK y CORS habilitado
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Device-ID')
         self.end_headers()
-
-        # Desempaquetado de 16 Bytes: !ffBHbbBBB
-        if len(payload) == 16:
-            lat, lon, speed, seq, accel_x, accel_y, net_type, os_ver, battery = struct.unpack("!ffBHbbBBB", payload)
-            
-            # Obtener ID único enviado por el cliente o respaldar por IP
-            host_id = self.headers.get('X-Device-ID')
-            if not host_id:
-                forwarded_ip = self.headers.get('X-Forwarded-For')
-                host_id = f"Movil_{forwarded_ip if forwarded_ip else self.client_address[0]}"
-
-            # Guardar/Actualizar estado del vehículo
-            vehiculos_activos[host_id] = {
-                "lat": lat,
-                "lon": lon,
-                "speed": speed,
-                "seq": seq,
-                "accel_x": round(accel_x / 10.0, 1),
-                "accel_y": round(accel_y / 10.0, 1),
-                "net_type": net_type,
-                "os_ver": os_ver,
-                "battery": battery,
-                "timestamp": time.time()
-            }
-
-            print(f"📦 [16B] {host_id} | Pos: ({lat:.5f}, {lon:.5f}) | Vel: {speed}km/h | Seq: #{seq} | Bat: {battery}%")
 
     def do_GET(self):
         if self.path == '/api/vehiculos':
@@ -149,7 +274,7 @@ class TelemetryHandler(BaseHTTPRequestHandler):
 
             self.wfile.write(json.dumps(respuesta).encode('utf-8'))
         else:
-            # Servir la interfaz web del Mapa
+            # Servir la interfaz web del Mapa Leaflet
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
@@ -163,13 +288,21 @@ class TelemetryHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return
+        return  # Silenciar logs HTTP predeterminados para mantener limpia la consola
 
 def main(puerto=8080):
+    # Arrancar hilos en segundo plano (Daemon Threads)
+    threading.Thread(target=worker_validador, daemon=True).start()
+    threading.Thread(target=worker_formateador, daemon=True).start()
+    threading.Thread(target=worker_persistencia_db, daemon=True).start()
+
     server = HTTPServer(('0.0.0.0', puerto), TelemetryHandler)
-    print(f"🚀 Servidor escuchando en el puerto {puerto}")
-    print(f"  ├─ Receptáculo POST: Recibiendo paquetes de 16B")
-    print(f"  └─ Mapa Web en Vivo: http://localhost:{puerto}")
+    print(f"🚀 Servidor Multihilo de Telemetría escuchando en http://localhost:{puerto}")
+    print(f"  ├─ Hilo 1: Servidor HTTP (Receptor)")
+    print(f"  ├─ Hilo 2: Validador de Integridad")
+    print(f"  ├─ Hilo 3: Formateador & Memoria en Vivo")
+    print(f"  └─ Hilo 4: Persistencia Masiva MySQL (Bulk Insert)")
+    
     try:
         server.serve_forever()
     except KeyboardInterrupt:
